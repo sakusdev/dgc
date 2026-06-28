@@ -4,7 +4,8 @@ interface Env {
   DISCORD_BOT_TOKEN: string;
   DISCORD_ALLOWED_CHANNEL_ID: string;
   ADMIN_TOKEN: string;
-  GCP_API_KEY: string;
+  GCP_CLIENT_EMAIL: string;
+  GCP_PRIVATE_KEY: string;
   GCP_PROJECT_ID: string;
   GCP_LOCATION: string;
   GEMINI_MODEL: string;
@@ -46,8 +47,19 @@ interface RegisterRequest {
   guildId?: string;
 }
 
+interface OAuthTokenResponse {
+  access_token?: string;
+  expires_in?: number;
+  error?: string;
+  error_description?: string;
+}
+
 const DISCORD_API = "https://discord.com/api/v10";
+const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
+const GOOGLE_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+
+let cachedGoogleToken: { token: string; expiresAt: number } | undefined;
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
@@ -61,6 +73,7 @@ export default {
           model: env.GEMINI_MODEL,
           channelRestrictionConfigured: Boolean(env.DISCORD_ALLOWED_CHANNEL_ID),
           queueConfigured: Boolean(env.GEMINI_QUEUE),
+          oauthConfigured: Boolean(env.GCP_CLIENT_EMAIL && env.GCP_PRIVATE_KEY),
         });
       }
 
@@ -185,6 +198,7 @@ async function callGemini(job: GeminiJob, env: Env): Promise<string> {
     `https://aiplatform.googleapis.com/v1/projects/${encodeURIComponent(env.GCP_PROJECT_ID)}` +
     `/locations/${encodeURIComponent(location)}/publishers/google/models/${encodeURIComponent(model)}:generateContent`;
 
+  const accessToken = await getGoogleAccessToken(env);
   const maxOutputTokens = clampInteger(Number(env.MAX_OUTPUT_TOKENS || 2048), 256, 8192);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort("Gemini request timed out"), 120_000);
@@ -192,7 +206,10 @@ async function callGemini(job: GeminiJob, env: Env): Promise<string> {
   try {
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { ...JSON_HEADERS, "x-goog-api-key": env.GCP_API_KEY },
+      headers: {
+        ...JSON_HEADERS,
+        authorization: `Bearer ${accessToken}`,
+      },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: env.SYSTEM_PROMPT }] },
         contents: [
@@ -231,6 +248,65 @@ async function callGemini(job: GeminiJob, env: Env): Promise<string> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function getGoogleAccessToken(env: Env): Promise<string> {
+  const now = Date.now();
+  if (cachedGoogleToken && cachedGoogleToken.expiresAt - 60_000 > now) {
+    return cachedGoogleToken.token;
+  }
+
+  if (!env.GCP_CLIENT_EMAIL || !env.GCP_PRIVATE_KEY) {
+    throw new Error("GCP_CLIENT_EMAIL or GCP_PRIVATE_KEY is not configured");
+  }
+
+  const issuedAt = Math.floor(now / 1000);
+  const header = base64UrlJson({ alg: "RS256", typ: "JWT" });
+  const payload = base64UrlJson({
+    iss: env.GCP_CLIENT_EMAIL,
+    scope: GOOGLE_SCOPE,
+    aud: GOOGLE_TOKEN_URL,
+    iat: issuedAt,
+    exp: issuedAt + 3600,
+  });
+  const unsignedJwt = `${header}.${payload}`;
+
+  const privateKey = await crypto.subtle.importKey(
+    "pkcs8",
+    pemToArrayBuffer(env.GCP_PRIVATE_KEY),
+    { name: "RSASSA-PKCS1-v1_5", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+
+  const signature = await crypto.subtle.sign(
+    "RSASSA-PKCS1-v1_5",
+    privateKey,
+    new TextEncoder().encode(unsignedJwt),
+  );
+  const assertion = `${unsignedJwt}.${base64UrlBytes(new Uint8Array(signature))}`;
+
+  const response = await fetch(GOOGLE_TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+      assertion,
+    }),
+  });
+
+  const tokenPayload = (await response.json()) as OAuthTokenResponse;
+  if (!response.ok || !tokenPayload.access_token) {
+    throw new Error(
+      `Google OAuth ${response.status}: ${tokenPayload.error_description || tokenPayload.error || "token request failed"}`,
+    );
+  }
+
+  cachedGoogleToken = {
+    token: tokenPayload.access_token,
+    expiresAt: now + (tokenPayload.expires_in ?? 3600) * 1000,
+  };
+  return cachedGoogleToken.token;
 }
 
 async function registerCommand(request: Request, env: Env): Promise<Response> {
@@ -342,6 +418,28 @@ async function verifyDiscordRequest(body: string, signatureHex: string, timestam
   } catch {
     return false;
   }
+}
+
+function pemToArrayBuffer(pem: string): ArrayBuffer {
+  const normalized = pem.replace(/\\n/g, "\n").trim();
+  const base64 = normalized
+    .replace("-----BEGIN PRIVATE KEY-----", "")
+    .replace("-----END PRIVATE KEY-----", "")
+    .replace(/\s+/g, "");
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes.buffer;
+}
+
+function base64UrlJson(value: unknown): string {
+  return base64UrlBytes(new TextEncoder().encode(JSON.stringify(value)));
+}
+
+function base64UrlBytes(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/=/g, "").replace(/\+/g, "-").replace(/\//g, "_");
 }
 
 function hexToBytes(hex: string): Uint8Array {
