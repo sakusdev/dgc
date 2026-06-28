@@ -25,6 +25,7 @@ interface DiscordInteraction {
 }
 interface GeminiJob { applicationId: string; interactionToken: string; prompt: string; displayName: string }
 interface RegisterRequest { guildId?: string }
+interface GeminiResult { text: string; model: string; usedFallback: boolean }
 
 const DISCORD_API = "https://discord.com/api/v10";
 const GEMINI_API = "https://generativelanguage.googleapis.com/v1beta";
@@ -100,8 +101,11 @@ async function handleDiscordInteraction(request: Request, env: Env): Promise<Res
 
 async function processGeminiJob(job: GeminiJob, env: Env): Promise<void> {
   try {
-    const answer = await callGeminiWithFallback(job, env);
-    const chunks = splitDiscordMessage(answer);
+    const result = await callGeminiWithFallback(job, env);
+    const prefix = result.usedFallback
+      ? `> ⚠️ \`${env.GEMINI_MODEL}\` が利用できなかったため、フォールバックモデル \`${result.model}\` を使用しました。\n\n`
+      : "";
+    const chunks = splitDiscordMessage(prefix + result.text);
     await editOriginalResponse(job, chunks[0] ?? "Gemini returned an empty response.");
     for (const chunk of chunks.slice(1)) await createFollowup(job, chunk);
   } catch (error) {
@@ -110,16 +114,16 @@ async function processGeminiJob(job: GeminiJob, env: Env): Promise<void> {
   }
 }
 
-async function callGeminiWithFallback(job: GeminiJob, env: Env): Promise<string> {
+async function callGeminiWithFallback(job: GeminiJob, env: Env): Promise<GeminiResult> {
   const primary = env.GEMINI_MODEL || "gemini-3.5-flash";
   const fallback = env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite";
   try {
-    return await callGemini(primary, job, env);
+    return { text: await callGemini(primary, job, env), model: primary, usedFallback: false };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (!isFallbackEligible(message) || fallback === primary) throw error;
     console.warn(`Primary Gemini model failed; falling back to ${fallback}: ${message}`);
-    return callGemini(fallback, job, env);
+    return { text: await callGemini(fallback, job, env), model: fallback, usedFallback: true };
   }
 }
 
