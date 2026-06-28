@@ -2,6 +2,7 @@ interface Env {
   DISCORD_PUBLIC_KEY: string;
   DISCORD_APPLICATION_ID: string;
   DISCORD_BOT_TOKEN: string;
+  DISCORD_ALLOWED_CHANNEL_ID: string;
   ADMIN_TOKEN: string;
   GCP_API_KEY: string;
   GCP_PROJECT_ID: string;
@@ -21,6 +22,7 @@ interface DiscordInteraction {
   application_id: string;
   type: number;
   token: string;
+  channel_id?: string;
   data?: { name?: string; options?: DiscordOption[] };
   member?: { user?: DiscordUser };
   user?: DiscordUser;
@@ -44,7 +46,12 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({ ok: true, service: "dgc", model: env.GEMINI_MODEL });
+      return Response.json({
+        ok: true,
+        service: "dgc",
+        model: env.GEMINI_MODEL,
+        channelRestrictionConfigured: Boolean(env.DISCORD_ALLOWED_CHANNEL_ID),
+      });
     }
 
     if (request.method === "GET" && url.pathname === "/setup") {
@@ -90,6 +97,28 @@ async function handleDiscordInteraction(request: Request, env: Env, ctx: Executi
 
   if (interaction.type !== 2 || interaction.data?.name !== "ask") {
     return Response.json({ type: 4, data: { content: "Unsupported command.", flags: 64 } });
+  }
+
+  const allowedChannelId = env.DISCORD_ALLOWED_CHANNEL_ID?.trim();
+  if (!allowedChannelId) {
+    return Response.json({
+      type: 4,
+      data: {
+        content: "⚠️ Bot管理者が利用可能チャンネルをまだ設定していません。",
+        flags: 64,
+      },
+    });
+  }
+
+  if (interaction.channel_id !== allowedChannelId) {
+    return Response.json({
+      type: 4,
+      data: {
+        content: `このBotは <#${allowedChannelId}> でのみ使用できます。`,
+        flags: 64,
+        allowed_mentions: { parse: [] },
+      },
+    });
   }
 
   const prompt = getStringOption(interaction, "prompt");
