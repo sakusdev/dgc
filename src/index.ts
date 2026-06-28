@@ -43,37 +43,42 @@ const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
+    try {
+      const url = new URL(request.url);
 
-    if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({
-        ok: true,
-        service: "dgc",
-        model: env.GEMINI_MODEL,
-        channelRestrictionConfigured: Boolean(env.DISCORD_ALLOWED_CHANNEL_ID),
-      });
+      if (request.method === "GET" && url.pathname === "/health") {
+        return Response.json({
+          ok: true,
+          service: "dgc",
+          model: env.GEMINI_MODEL,
+          channelRestrictionConfigured: Boolean(env.DISCORD_ALLOWED_CHANNEL_ID),
+        });
+      }
+
+      if (request.method === "GET" && url.pathname === "/setup") {
+        return new Response(setupPage(), {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+            "referrer-policy": "no-referrer",
+          },
+        });
+      }
+
+      if (request.method === "POST" && url.pathname === "/setup/register") {
+        return registerCommand(request, env);
+      }
+
+      if (request.method !== "POST" || url.pathname !== "/discord") {
+        return new Response("Not found", { status: 404 });
+      }
+
+      return handleDiscordInteraction(request, env, ctx);
+    } catch (error) {
+      console.error("Unhandled Worker error", error);
+      return new Response("Internal Server Error", { status: 500 });
     }
-
-    if (request.method === "GET" && url.pathname === "/setup") {
-      return new Response(setupPage(), {
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "cache-control": "no-store",
-          "x-content-type-options": "nosniff",
-          "referrer-policy": "no-referrer",
-        },
-      });
-    }
-
-    if (request.method === "POST" && url.pathname === "/setup/register") {
-      return registerCommand(request, env);
-    }
-
-    if (request.method !== "POST" || url.pathname !== "/discord") {
-      return new Response("Not found", { status: 404 });
-    }
-
-    return handleDiscordInteraction(request, env, ctx);
   },
 } satisfies ExportedHandler<Env>;
 
@@ -126,8 +131,16 @@ async function handleDiscordInteraction(request: Request, env: Env, ctx: Executi
     return Response.json({ type: 4, data: { content: "質問内容が空です。", flags: 64 } });
   }
 
-  ctx.waitUntil(generateAndReply(interaction, prompt, env));
-  return Response.json({ type: 5 });
+  ctx.waitUntil(
+    Promise.resolve()
+      .then(() => generateAndReply(interaction, prompt, env))
+      .catch((error) => console.error("Background task failed", error)),
+  );
+
+  return new Response(JSON.stringify({ type: 5 }), {
+    status: 200,
+    headers: JSON_HEADERS,
+  });
 }
 
 async function registerCommand(request: Request, env: Env): Promise<Response> {
@@ -200,7 +213,7 @@ async function registerCommand(request: Request, env: Env): Promise<Response> {
 
 function setupPage(): string {
   return `<!doctype html>
-<html lang="ja">
+<html lang="ja">">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -265,7 +278,11 @@ async function generateAndReply(interaction: DiscordInteraction, prompt: string,
   } catch (error) {
     console.error("Generation failed", error);
     const message = error instanceof Error ? error.message : "Unknown error";
-    await editOriginalResponse(interaction, `⚠️ Geminiへの問い合わせに失敗しました。\n\`${escapeInlineCode(message).slice(0, 1500)}\``);
+    try {
+      await editOriginalResponse(interaction, `⚠️ Geminiへの問い合わせに失敗しました。\n\`${escapeInlineCode(message).slice(0, 1500)}\``);
+    } catch (replyError) {
+      console.error("Failed to report generation error to Discord", replyError);
+    }
   }
 }
 
