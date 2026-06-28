@@ -2,7 +2,7 @@
 
 Cloudflare Workers 上で動作する、Discord `/ask` コマンド対応の Vertex AI Gemini チャットボットです。
 
-ランタイム依存を持たない軽量な TypeScript 実装で、Discord の Ed25519 署名検証、3秒以内の遅延応答、Vertex AI 呼び出し、Discord の2000文字制限に合わせた分割送信を行います。
+セットアップから運用までブラウザだけで完結します。ローカルPC、Node.js、Wrangler CLIの実行は不要です。
 
 ## 構成
 
@@ -22,35 +22,42 @@ Discord の元メッセージを更新
 - Discord Application / Bot
 - Vertex AI API を有効化した Google Cloud プロジェクト
 - サービスアカウントに紐づけた Vertex AI 用 API キー
-- Node.js 20 以降
 
-## 1. ローカル準備
+## 1. CloudflareでGitHub連携デプロイ
 
-```bash
-git clone https://github.com/sakusdev/dgc.git
-cd dgc
-npm install
+Cloudflare Dashboardで次へ進みます。
+
+```text
+Workers & Pages
+→ Create
+→ Import a repository
+→ sakusdev/dgc
 ```
 
-## 2. Cloudflare にログイン
+設定:
 
-```bash
-npx wrangler login
+```text
+Production branch: main
+Root directory: /
+Build command: npm run deploy
 ```
 
-## 3. Secrets を登録
+GitHubの`main`へ変更が入ると自動で再デプロイされます。
 
-```bash
-npx wrangler secret put DISCORD_PUBLIC_KEY
-npx wrangler secret put GCP_API_KEY
-npx wrangler secret put GCP_PROJECT_ID
-```
+## 2. CloudflareにSecretを登録
 
-値の取得場所:
+Workerの Settings → Variables and Secrets で、以下をすべて **Secret** として登録します。
 
-- `DISCORD_PUBLIC_KEY`: Discord Developer Portal → General Information → Public Key
-- `GCP_API_KEY`: Google Cloud Console で発行した Vertex AI 用 API キー
-- `GCP_PROJECT_ID`: Google Cloud のプロジェクト ID。表示名ではありません
+| 名前 | 値 |
+|---|---|
+| `DISCORD_PUBLIC_KEY` | Discord Developer Portal → General Information → Public Key |
+| `DISCORD_APPLICATION_ID` | Discord Developer Portal → General Information → Application ID |
+| `DISCORD_BOT_TOKEN` | Discord Developer Portal → Bot → Reset Token / Copy |
+| `ADMIN_TOKEN` | 自分で決めた長いランダムな文字列 |
+| `GCP_API_KEY` | Google Cloudで発行したVertex AI用APIキー |
+| `GCP_PROJECT_ID` | Google CloudのプロジェクトID。プロジェクト番号ではありません |
+
+`ADMIN_TOKEN` は `/setup` 管理画面からコマンドを登録するための合言葉です。最低でも32文字程度のランダム文字列を推奨します。
 
 通常設定は `wrangler.toml` にあります。
 
@@ -60,20 +67,56 @@ GEMINI_MODEL = "gemini-3.1-pro-preview"
 MAX_OUTPUT_TOKENS = "2048"
 ```
 
-利用可能なモデル ID が変わった場合は `GEMINI_MODEL` を更新してください。
+## 3. DiscordのInteractions Endpoint URLを設定
 
-## 4. デプロイ
-
-```bash
-npm run typecheck
-npm run deploy
-```
-
-デプロイ後に次のような URL が表示されます。
+デプロイ後のWorker URLが次の場合:
 
 ```text
 https://dgc.<your-subdomain>.workers.dev
 ```
+
+Discord Developer Portal → General Information → Interactions Endpoint URL に次を設定します。
+
+```text
+https://dgc.<your-subdomain>.workers.dev/discord
+```
+
+保存時にDiscordから検証リクエストが送信されます。成功すればWorkerの署名検証も正常です。
+
+## 4. ブラウザから `/ask` を登録
+
+ブラウザで次を開きます。
+
+```text
+https://dgc.<your-subdomain>.workers.dev/setup
+```
+
+画面で入力するもの:
+
+- `ADMIN_TOKEN`: Cloudflareへ保存した値
+- テストサーバーID: すぐ試す場合だけ入力
+
+テストサーバーIDを入力すると、そのDiscordサーバーだけへ即時登録します。空欄で実行するとグローバルコマンドとして登録します。
+
+これでローカルコマンドの実行は不要です。
+
+## 5. BotをDiscordサーバーへ招待
+
+Discord Developer Portal → OAuth2 → URL Generator で次を選択します。
+
+```text
+Scopes:
+- bot
+- applications.commands
+
+Bot Permissions:
+- Send Messages
+- Use Slash Commands
+```
+
+生成されたURLをブラウザで開き、Botをサーバーへ追加します。
+
+## 動作確認
 
 ヘルスチェック:
 
@@ -81,82 +124,36 @@ https://dgc.<your-subdomain>.workers.dev
 https://dgc.<your-subdomain>.workers.dev/health
 ```
 
-Discord の Interactions Endpoint URL:
+成功例:
+
+```json
+{"ok":true,"service":"dgc","model":"gemini-3.1-pro-preview"}
+```
+
+Discordで:
 
 ```text
-https://dgc.<your-subdomain>.workers.dev/discord
+/ask prompt: こんにちは
 ```
-
-Discord Developer Portal → General Information → Interactions Endpoint URL に設定してください。
-
-## 5. `/ask` コマンドを登録
-
-ローカル環境で次を設定します。
-
-```bash
-export DISCORD_APPLICATION_ID="Discord Application ID"
-export DISCORD_BOT_TOKEN="Discord Bot Token"
-```
-
-テスト用サーバーに即時登録する場合:
-
-```bash
-export DISCORD_GUILD_ID="Discord Server ID"
-npm run register
-```
-
-全サーバー向けのグローバルコマンドとして登録する場合:
-
-```bash
-unset DISCORD_GUILD_ID
-npm run register
-```
-
-グローバルコマンドは反映に時間がかかる場合があります。
-
-## 6. Bot をサーバーへ招待
-
-Discord Developer Portal → OAuth2 → URL Generator で次を選択します。
-
-- Scopes: `bot`, `applications.commands`
-- Bot Permissions: `Send Messages`, `Use Slash Commands`
-
-生成された URL から Bot を招待してください。
-
-## ローカル開発
-
-`.dev.vars` を作成します。このファイルは Git 管理されません。
-
-```dotenv
-DISCORD_PUBLIC_KEY=...
-GCP_API_KEY=...
-GCP_PROJECT_ID=...
-```
-
-起動:
-
-```bash
-npm run dev
-```
-
-Discord は公開 HTTPS URL を要求するため、実際の Interaction テストではデプロイ済み Worker を使う方が簡単です。
 
 ## 無料枠について
 
-Cloudflare Workers Free で小規模運用できます。Gemini 3.1 Pro 自体は常設の無料モデルではないため、Vertex AI の Google Cloud 無料トライアルクレジット内では実質無料ですが、クレジット終了後はモデル利用料金が発生します。
+Cloudflare Workers Freeで小規模運用できます。Gemini 3.1 Pro自体は常設無料ではないため、Google Cloud無料トライアルクレジット内では実質無料ですが、クレジット終了後はモデル利用料金が発生します。
 
-完全な常設無料運用を優先する場合は、`GEMINI_MODEL` を無料枠対象の Flash 系モデルへ変更してください。
+完全な常設無料運用を優先する場合は、`GEMINI_MODEL` を無料枠対象のFlash系モデルへ変更してください。
 
 ## 現在の制約
 
-- Discord Gateway へ常時接続しないため、通常メッセージやメンション監視ではなく `/ask` 方式です
+- Discord Gatewayへ常時接続しないため、通常メッセージやメンション監視ではなく`/ask`方式です
 - 会話履歴はまだ保存しません
-- Worker は Discord に即時 defer を返した後、最大25秒で Gemini 呼び出しを打ち切ります
-- 非常に長い応答は複数の Discord メッセージへ分割されます
+- WorkerはDiscordへ即時deferを返した後、最大25秒でGemini呼び出しを打ち切ります
+- 非常に長い応答は複数のDiscordメッセージへ分割されます
 
 ## セキュリティ
 
-- API キーや Bot Token をソースコードへ書かないでください
-- GitHub Actions や Cloudflare では必ず Secret として保存してください
-- Worker は Discord の Ed25519 署名を検証します
-- Gemini の出力による意図しないメンションを防ぐため、Discord の `allowed_mentions` を無効化しています
+- APIキーやBot TokenをGitHubへ保存しないでください
+- Cloudflareでは必ずSecretとして保存してください
+- `/setup/register` は `ADMIN_TOKEN` が一致しない限り実行できません
+- `/setup` へ入力した `ADMIN_TOKEN` はブラウザに保存されません
+- WorkerはDiscordのEd25519署名を検証します
+- Gemini出力による意図しないメンションを防ぐため、Discordの`allowed_mentions`を無効化しています
