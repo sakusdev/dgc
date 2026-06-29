@@ -1,7 +1,7 @@
 interface Env {
   DISCORD_PUBLIC_KEY:string; DISCORD_APPLICATION_ID:string; DISCORD_BOT_TOKEN:string;
   DISCORD_ALLOWED_CHANNEL_ID:string; ADMIN_TOKEN:string; GEMINI_API_KEY:string;
-  GEMINI_MODEL:string; GEMINI_FALLBACK_MODEL:string; OPENROUTER_API_KEY:string;
+  GEMMA_MODEL:string; GEMINI_MODEL:string; GEMINI_FALLBACK_MODEL:string; OPENROUTER_API_KEY:string;
   OPENROUTER_MODEL:string; MAX_OUTPUT_TOKENS:string; MEMORY_MESSAGES:string;
   SYSTEM_PROMPT:string; GEMINI_QUEUE:Queue<Job>; MEMORY_STORE:DurableObjectNamespace;
 }
@@ -32,7 +32,7 @@ export class MemoryStore {
 export default {
   async fetch(req:Request,env:Env){
     const u=new URL(req.url);
-    if(req.method==="GET"&&u.pathname==="/health") return Response.json({ok:true,service:"dgc",memoryConfigured:!!env.MEMORY_STORE,memoryMessages:limit(env),geminiModel:env.GEMINI_MODEL,geminiFallbackModel:env.GEMINI_FALLBACK_MODEL,openRouterModel:env.OPENROUTER_MODEL});
+    if(req.method==="GET"&&u.pathname==="/health") return Response.json({ok:true,service:"dgc",memoryConfigured:!!env.MEMORY_STORE,memoryMessages:limit(env),gemmaModel:env.GEMMA_MODEL,geminiModel:env.GEMINI_MODEL,geminiFallbackModel:env.GEMINI_FALLBACK_MODEL,openRouterModel:env.OPENROUTER_MODEL});
     if(req.method==="GET"&&u.pathname==="/setup") return new Response(setup(),{headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store"}});
     if(req.method==="POST"&&u.pathname==="/setup/register") return register(req,env);
     if(req.method==="POST"&&u.pathname==="/discord") return discord(req,env);
@@ -70,12 +70,19 @@ async function process(job:Job,env:Env){
       const text=await openrouter(model,job,history,env); await save(env,job,text);
       return finish(job,`> ✅ 使用モデル：\`${model}\`（OpenRouter）\n> 🧠 メモリ：ON\n\n${text}`);
     }
-    const primary=env.GEMINI_MODEL||"gemini-3.5-flash",fallback=env.GEMINI_FALLBACK_MODEL||"gemini-3.1-flash-lite";
-    await edit(job,`🤔 Thinking… 使用モデル：\`${primary}\`\n🧠 メモリ：${history.length}件`);
-    let model=primary,text:string,used=false;
-    try{text=await gemini(primary,job,history,env)}catch(e){const s=e instanceof Error?e.message:String(e);if(!/Gemini API (429|500|503|504):/.test(s))throw e;used=true;model=fallback;await edit(job,`🤔 Thinking… 使用モデル：\`${fallback}\`\nフォールバック中\n🧠 メモリ：${history.length}件`);text=await gemini(fallback,job,history,env)}
+
+    const models=[env.GEMMA_MODEL||"gemma-4-31b-it",env.GEMINI_MODEL||"gemini-3.5-flash",env.GEMINI_FALLBACK_MODEL||"gemini-3.1-flash-lite"].filter((x,i,a)=>x&&a.indexOf(x)===i);
+    let model=models[0],text="",usedIndex=0,lastError:unknown;
+    for(let i=0;i<models.length;i++){
+      model=models[i];
+      await edit(job,`🤔 Thinking… 使用モデル：\`${model}\`${i?`\nフォールバック ${i}/${models.length-1}`:""}\n🧠 メモリ：${history.length}件`);
+      try{text=await gemini(model,job,history,env);usedIndex=i;lastError=undefined;break}
+      catch(e){lastError=e;const s=e instanceof Error?e.message:String(e);if(!/Gemini API (400|403|404|408|409|429|500|502|503|504):/.test(s)||i===models.length-1)throw e}
+    }
+    if(lastError)throw lastError;
     await save(env,job,text);
-    return finish(job,`${used?"> ⚠️ フォールバック":" > ✅ 使用モデル"}：\`${model}\`\n> 🧠 メモリ：ON\n\n${text}`);
+    const head=usedIndex?`> ⚠️ フォールバックモデル：\`${model}\``:`> ✅ 使用モデル：\`${model}\``;
+    return finish(job,`${head}\n> 🧠 メモリ：ON\n\n${text}`);
   }catch(e){await edit(job,`⚠️ AIへの問い合わせに失敗しました。\n\`${safe(e instanceof Error?e.message:String(e)).slice(0,1500)}\``)}
 }
 
@@ -99,7 +106,7 @@ function tokens(env:Env){return Math.max(256,Math.min(8192,Number(env.MAX_OUTPUT
 async function register(req:Request,env:Env){
   if(req.headers.get("authorization")!==`Bearer ${env.ADMIN_TOKEN}`)return Response.json({ok:false,error:"Unauthorized"},{status:401});
   const {guildId}=await req.json() as {guildId?:string};const route=guildId?`/applications/${env.DISCORD_APPLICATION_ID}/guilds/${guildId}/commands`:`/applications/${env.DISCORD_APPLICATION_ID}/commands`;const opt=[{name:"prompt",description:"質問内容",type:3,required:true,max_length:4000}];
-  const r=await fetch(D+route,{method:"PUT",headers:{...J,authorization:`Bot ${env.DISCORD_BOT_TOKEN}`},body:JSON.stringify([{name:"ask",description:"Geminiに質問（メモリ対応）",type:1,options:opt},{name:"askd",description:"NVIDIA Nemotronに質問（メモリ対応）",type:1,options:opt},{name:"forget",description:"自分の会話メモリを削除",type:1}])});
+  const r=await fetch(D+route,{method:"PUT",headers:{...J,authorization:`Bot ${env.DISCORD_BOT_TOKEN}`},body:JSON.stringify([{name:"ask",description:"Gemma/Geminiに質問（メモリ対応）",type:1,options:opt},{name:"askd",description:"NVIDIA Nemotronに質問（メモリ対応）",type:1,options:opt},{name:"forget",description:"自分の会話メモリを削除",type:1}])});
   const text=await r.text();return r.ok?Response.json({ok:true,message:"/ask・/askd・/forget を登録しました。"}):Response.json({ok:false,error:`Discord API ${r.status}: ${compact(text)}`},{status:r.status});
 }
 function setup(){return`<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width"><style>body{font-family:system-ui;max-width:560px;margin:60px auto;background:#111;color:#eee}input,button{width:100%;box-sizing:border-box;padding:12px;margin:8px 0;background:#222;color:#fff;border:1px solid #555;border-radius:9px}</style><h1>dgc セットアップ</h1><input id=t type=password placeholder=ADMIN_TOKEN><input id=g placeholder="Guild ID"><button id=b>コマンドを登録</button><pre id=r></pre><script>b.onclick=async()=>{let x=await fetch('/setup/register',{method:'POST',headers:{'content-type':'application/json',authorization:'Bearer '+t.value},body:JSON.stringify({guildId:g.value.trim()||undefined})});r.textContent=JSON.stringify(await x.json(),null,2)}</script>`}
