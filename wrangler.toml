@@ -6,7 +6,7 @@ workers_dev = true
 [vars]
 GEMINI_MODEL = "gemini-3.5-flash"
 GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"
-OPENROUTER_MODEL = "deepseek/deepseek-r1-0528:free"
+OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 MAX_OUTPUT_TOKENS = "2048"
 SYSTEM_PROMPT = "You are a helpful Discord assistant. Answer clearly and concisely. Match the user's language. Discord markdown is supported."
 
